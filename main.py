@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import List, Dict, Tuple, Any
 from tkinter import filedialog, messagebox
 from datetime import datetime
+import time 
 
 # --- CONFIGURATION & CONSTANTS ---
 AUTHOR_ID = "KNT15083"
@@ -17,7 +18,7 @@ PROJECT_NAME = "ExcelDiff Tool"
 THEME_COLOR = "#2C3E50"  
 ACCENT_COLOR = "#27AE60" 
 HOVER_COLOR = "#2ECC71"
-TOLERANCE_DEFAULT = 3 # Mặc định cố định là 3px, không hiển thị trên UI
+TOLERANCE_DEFAULT = 3 
 
 # UI Colors & Fonts
 STATUS_BAR_BG = "#23272D" 
@@ -35,6 +36,10 @@ xlSrcRange = 1
 xlYes = 1
 xlTop = -4160
 xlLeft = -4131
+xlNormalView = 1 
+xlCalculationManual = -4135
+xlCalculationAutomatic = -4105
+xlMaximized = -4137
 
 # --- LOCALIZATION DATA ---
 LANGUAGES = {
@@ -46,7 +51,7 @@ LANGUAGES = {
         "placeholder_old": "Path to original file...",
         "placeholder_new": "Path to new file...",
         "output": "Output Folder:",
-        "placeholder_out": "Default: Desktop",
+        "placeholder_out": "Default: Downloads", 
         "limit_scan": "Limit Scan Range",
         "scope_types": ["Whole Sheet", "Columns Only", "Rows Only", "Specific Range"],
         "force_kill": "Force Kill Excel",
@@ -89,7 +94,7 @@ LANGUAGES = {
         "placeholder_old": "Đường dẫn file gốc...",
         "placeholder_new": "Đường dẫn file mới...",
         "output": "Thư mục ra:",
-        "placeholder_out": "Mặc định: Desktop",
+        "placeholder_out": "Mặc định: Downloads", 
         "limit_scan": "Giới hạn vùng quét",
         "scope_types": ["Toàn bộ Sheet", "Chỉ Cột", "Chỉ Hàng", "Vùng cụ thể"],
         "force_kill": "Force Kill Excel",
@@ -132,7 +137,7 @@ LANGUAGES = {
         "placeholder_old": "元ファイルのパス...",
         "placeholder_new": "新ファイルのパス...",
         "output": "出力フォルダ:",
-        "placeholder_out": "デフォルト: デスクトップ",
+        "placeholder_out": "デフォルト: Downloads", 
         "limit_scan": "スキャン範囲を制限",
         "scope_types": ["シート全体", "列のみ", "行のみ", "指定範囲"],
         "force_kill": "Force Kill Excel", 
@@ -229,7 +234,10 @@ class ExcelEngine:
             pass
 
     def robust_open(self, path_old, path_new, force_reset=True):
-        """Opens Excel safely and loads workbooks."""
+        """
+        Opens Excel safely and loads workbooks in a SEPARATE instance.
+        Sử dụng DispatchEx để tránh ảnh hưởng đến các file Excel đang mở của người dùng.
+        """
         if force_reset:
             self.kill_excel()
         
@@ -237,38 +245,72 @@ class ExcelEngine:
         pythoncom.CoInitialize() 
         
         try:
-            self.app = win32.gencache.EnsureDispatch("Excel.Application")
-        except:
-            self.app = win32.Dispatch("Excel.Application")
-            
-        self.app.Visible = False
-        self.app.DisplayAlerts = False
-        self.app.AskToUpdateLinks = False
-        
-        try:
-            self.wb_old = self.app.Workbooks.Open(Filename=os.path.abspath(path_old), ReadOnly=True, UpdateLinks=0, CorruptLoad=1)
-            if self.wb_old.ActiveSheet.ProtectContents:
-                try: self.wb_old.ActiveSheet.Unprotect()
-                except: pass
-            
+            # [FIXED] Sửa lỗi cú pháp: Bỏ .client bị thừa
+            # win32 ở đây chính là win32com.client (do bạn import as win32)
             try:
-                self.wb_old.Activate()
-                self.app.ActiveWindow.Zoom = 100
-            except: pass
+                self.app = win32.DispatchEx("Excel.Application")
+            except Exception:
+                # Fallback nếu máy không hỗ trợ DispatchEx (hiếm)
+                self.app = win32.Dispatch("Excel.Application")
+            
+            # Cấu hình ẩn và tắt cảnh báo cho instance riêng biệt này
+            self.app.Visible = False
+            self.app.DisplayAlerts = False
+            self.app.AskToUpdateLinks = False
+            
+            # Tối ưu: Tắt cập nhật màn hình ngay từ đầu
+            self.app.ScreenUpdating = False 
+            
+            # --- MỞ FILE CŨ (SOURCE/OLD) ---
+            try:
+                self.wb_old = self.app.Workbooks.Open(
+                    Filename=os.path.abspath(path_old), 
+                    ReadOnly=True, 
+                    UpdateLinks=0, 
+                    CorruptLoad=1
+                )
+                
+                # Xử lý Protected View
+                if self.app.ProtectedViewWindows.Count > 0:
+                    try:
+                        for i in range(self.app.ProtectedViewWindows.Count, 0, -1):
+                            self.app.ProtectedViewWindows(i).Edit()
+                    except: pass
 
-            self.wb_new = self.app.Workbooks.Open(Filename=os.path.abspath(path_new), ReadOnly=True, UpdateLinks=0, CorruptLoad=1)
-            if self.wb_new.ActiveSheet.ProtectContents:
-                try: self.wb_new.ActiveSheet.Unprotect()
-                except: pass
+                # Xử lý Sheet bị khóa
+                if self.wb_old.ActiveSheet.ProtectContents:
+                    try: self.wb_old.ActiveSheet.Unprotect()
+                    except: pass
             
+            except Exception as e:
+                raise Exception(f"Error opening Source file (Old): {str(e)}")
+            
+            # --- MỞ FILE MỚI (TARGET/NEW) ---
             try:
-                self.wb_new.Activate()
-                self.app.ActiveWindow.Zoom = 100
-            except: pass
+                self.wb_new = self.app.Workbooks.Open(
+                    Filename=os.path.abspath(path_new), 
+                    ReadOnly=True, 
+                    UpdateLinks=0, 
+                    CorruptLoad=1
+                )
+                
+                if self.app.ProtectedViewWindows.Count > 0:
+                    try:
+                        for i in range(self.app.ProtectedViewWindows.Count, 0, -1):
+                            self.app.ProtectedViewWindows(i).Edit()
+                    except: pass
+
+                if self.wb_new.ActiveSheet.ProtectContents:
+                    try: self.wb_new.ActiveSheet.Unprotect()
+                    except: pass
+
+            except Exception as e:
+                raise Exception(f"Error opening Target file (New): {str(e)}")
                 
         except Exception as e:
+            # Nếu gặp lỗi, cleanup để tắt process Excel ẩn
             self.cleanup()
-            raise Exception(f"Error opening files: {str(e)}")
+            raise Exception(f"System Error: {str(e)}")
 
     def get_sheet_by_name(self, wb, name):
         try:
@@ -276,46 +318,134 @@ class ExcelEngine:
         except:
             return wb.Sheets(1) 
 
-    def extract_shapes(self, ws, scan_range_addr=None, log_func=None) -> Dict[int, ShapeData]:
+    def extract_shapes(self, ws, file_label="Unknown File", scan_range_addr=None, log_func=None) -> Dict[int, ShapeData]:
+        # [CRITICAL LOGIC UPDATE] 
+        # Sử dụng wb.Windows(1) thay vì ActiveWindow để tránh lỗi focus nhầm file
+        
+        try:
+            if log_func: log_func(f"[{file_label}] Preparing View State...")
+
+            # 0. HANDLE PROTECTED VIEW
+            if self.app.ProtectedViewWindows.Count > 0:
+                try:
+                    count = self.app.ProtectedViewWindows.Count
+                    if log_func: log_func(f"[{file_label}] Detect {count} Protected View windows. Attempting to unblock...")
+                    for i in range(count, 0, -1):
+                        self.app.ProtectedViewWindows(i).Edit()
+                except: pass
+
+            # 1. Access Specific Window of the Workbook (Safe Targeting)
+            wb = ws.Parent
+            
+            if wb.Windows.Count == 0:
+                wb.NewWindow()
+                
+            my_window = wb.Windows(1) 
+            my_window.Visible = True
+            
+            wb.Activate()
+            ws.Activate()
+            
+            # [TRICK] Bật cập nhật màn hình tạm thời
+            self.app.ScreenUpdating = True 
+            
+            # 2. Force View & Zoom trên đúng cửa sổ đó
+            try:
+                if my_window.View != xlNormalView:
+                    my_window.View = xlNormalView
+            except: pass
+            
+            # 3. Toggle Zoom with Retry
+            for attempt in range(3):
+                try:
+                    my_window.Zoom = 100
+                    if my_window.Zoom == 100: break
+                    
+                    # Vẩy zoom
+                    my_window.Zoom = 101
+                    my_window.Zoom = 100
+                    if my_window.Zoom == 100: break
+                except:
+                    time.sleep(0.5)
+            
+            # 4. VERIFY 
+            current_zoom = my_window.Zoom
+            if log_func: log_func(f"[{file_label}] View State Verified: Zoom {current_zoom}%")
+            
+            if abs(current_zoom - 100) > 1: 
+                err_msg = (f"[{file_label}] CRITICAL: Failed to enforce 100% Zoom. Current is {current_zoom}%.")
+                raise Exception(err_msg)
+                
+        except Exception as e:
+            err_msg = f"[{file_label}] CRITICAL VIEW ERROR: {str(e)}"
+            print(err_msg)
+            if log_func: log_func(err_msg)
+            raise Exception(err_msg)
+
+        # --- [SPEED OPTIMIZATION 1] ---
+        # Tắt cập nhật màn hình NGAY LẬP TỨC sau khi đã fix xong Zoom
+        self.app.ScreenUpdating = False 
+
+        # 5. SCAN VALUES
+        if log_func: log_func(f"[{file_label}] Starting Shape Scan...")
+
         shape_dict = {}
         shapes = ws.Shapes
         total_shapes = shapes.Count 
         
+        # --- [SPEED OPTIMIZATION 2] ---
+        r_min, c_min, r_max, c_max = 0, 0, 0, 0
+        use_custom_bounds = False
+        
         try:
             if scan_range_addr and scan_range_addr.strip() != "":
                 scan_area = ws.Range(scan_range_addr)
+                r_min = scan_area.Row
+                c_min = scan_area.Column
+                r_max = r_min + scan_area.Rows.Count - 1
+                c_max = c_min + scan_area.Columns.Count - 1
+                use_custom_bounds = True
             else:
                 scan_area = ws.UsedRange
+                r_min = scan_area.Row
+                c_min = scan_area.Column
+                r_max = r_min + scan_area.Rows.Count - 1
+                c_max = c_min + scan_area.Columns.Count - 1
+                use_custom_bounds = True 
         except Exception as e:
-            if log_func: log_func(f"Warning: Invalid range '{scan_range_addr}'. Using UsedRange.")
-            scan_area = ws.UsedRange
+            if log_func: log_func(f"[{file_label}] Warning: Bound calc failed. Scan all.")
+            use_custom_bounds = False
         
         for i, shp in enumerate(shapes):
             current_idx = i + 1
-            if log_func:
-                log_func(f"Scanning Shape {current_idx}/{total_shapes}: {shp.Name}...")
+            if log_func and current_idx % 10 == 0: 
+                log_func(f"[{file_label}] Scanning Shape {current_idx}/{total_shapes}...")
 
             try:
-                if self.app.Intersect(shp.TopLeftCell, scan_area):
-                    anchor = shp.TopLeftCell
-                    s_data = ShapeData(
-                        id=shp.ID,
-                        name=shp.Name,
-                        height=shp.Height,
-                        width=shp.Width,
-                        abs_top=shp.Top,
-                        abs_left=shp.Left,
-                        anchor_address=anchor.Address,
-                        anchor_row=anchor.Row,
-                        anchor_col=anchor.Column,
-                        rel_top=shp.Top - anchor.Top,   
-                        rel_left=shp.Left - anchor.Left 
-                    )
-                    shape_dict[shp.ID] = s_data
+                # Check Bounds bằng số học
+                tl_cell = shp.TopLeftCell
+                if use_custom_bounds:
+                    if not (r_min <= tl_cell.Row <= r_max and c_min <= tl_cell.Column <= c_max):
+                        continue # Bỏ qua nếu nằm ngoài vùng
+                
+                s_data = ShapeData(
+                    id=shp.ID,
+                    name=shp.Name,
+                    height=shp.Height,
+                    width=shp.Width,
+                    abs_top=shp.Top,
+                    abs_left=shp.Left,
+                    anchor_address=tl_cell.Address,
+                    anchor_row=tl_cell.Row,
+                    anchor_col=tl_cell.Column,
+                    rel_top=shp.Top - tl_cell.Top,   
+                    rel_left=shp.Left - tl_cell.Left 
+                )
+                shape_dict[shp.ID] = s_data
             except Exception:
                 continue 
         
-        if log_func: log_func(f"Scan Complete. Found {len(shape_dict)} valid shapes inside range.")
+        if log_func: log_func(f"[{file_label}] Scan Complete. Found {len(shape_dict)} valid shapes.")
         return shape_dict
 
     def get_used_range_values(self, ws):
@@ -324,144 +454,222 @@ class ExcelEngine:
         if not isinstance(data, tuple): return [[data]] 
         return [list(row) for row in data]
 
+    def _optimize_speed(self, enable=True):
+        """[UPDATED] Tắt/Bật cập nhật màn hình để tăng tốc độ Copy."""
+        try:
+            if enable:
+                self.app.ScreenUpdating = False
+                self.app.Calculation = xlCalculationManual 
+                self.app.EnableEvents = False
+            else:
+                self.app.ScreenUpdating = True
+                self.app.Calculation = xlCalculationAutomatic 
+                self.app.EnableEvents = True
+        except:
+            pass
+
     def create_report_workbook(self, output_folder, cell_diffs: List[CellDiff], shape_diffs: List[ShapeDiff], 
                                ws_src_old, ws_src_new, only_diffs=False, highlight_changes=False):
         """Generates the formatted Excel report."""
-        wb_out = self.app.Workbooks.Add()
         
-        # 1. COPY SOURCE SHEETS
-        ws_src_old.Copy(After=wb_out.Sheets(wb_out.Sheets.Count))
-        ws_copy_old = wb_out.Sheets(wb_out.Sheets.Count)
-        ws_copy_old.Name = "Source_Old"
+        self._optimize_speed(True)
         
-        ws_src_new.Copy(After=wb_out.Sheets(wb_out.Sheets.Count))
-        ws_copy_new = wb_out.Sheets(wb_out.Sheets.Count)
-        ws_copy_new.Name = "Source_New"
-        
-        # OPTION: HIGHLIGHT CHANGES IN SOURCE_NEW
-        if highlight_changes:
-            for s in shape_diffs:
-                # If not MATCH and not DELETED (Deleted doesnt exist in New)
-                if s.verdict != "MATCH" and "DELETED" not in s.verdict:
-                    if s.act_anchor and s.act_anchor != "N/A":
+        try:
+            wb_out = self.app.Workbooks.Add()
+            
+            # 1. COPY SOURCE SHEETS
+            try:
+                ws_src_old.Parent.Activate()
+                ws_src_old.Activate()
+            except: pass
+            
+            ws_src_old.Copy(After=wb_out.Sheets(wb_out.Sheets.Count))
+            ws_copy_old = wb_out.Sheets(wb_out.Sheets.Count)
+            ws_copy_old.Name = "Source_Old"
+            
+            try:
+                ws_src_new.Parent.Activate()
+                ws_src_new.Activate()
+            except: pass
+            
+            ws_src_new.Copy(After=wb_out.Sheets(wb_out.Sheets.Count))
+            ws_copy_new = wb_out.Sheets(wb_out.Sheets.Count)
+            ws_copy_new.Name = "Source_New"
+            
+            # --- TÔ MÀU CẢ 2 SHEET ---
+            if highlight_changes:
+                red_addresses_new = []
+                red_addresses_old = []
+                
+                for s in shape_diffs:
+                    if s.verdict != "MATCH" and "DELETED" not in s.verdict:
+                        if s.act_anchor and s.act_anchor != "N/A":
+                            red_addresses_new.append(s.act_anchor)
+                            
+                    if s.verdict != "MATCH" and "NEW" not in s.verdict:
+                        if s.old_anchor and s.old_anchor != "N/A":
+                            red_addresses_old.append(s.old_anchor)
+                
+                # Tô màu cho New Sheet
+                if red_addresses_new:
+                    chunk_size = 20
+                    for i in range(0, len(red_addresses_new), chunk_size):
+                        chunk = red_addresses_new[i:i + chunk_size]
+                        addr_str = ",".join(chunk)
                         try:
-                            # Color Red (255)
-                            ws_copy_new.Range(s.act_anchor).Interior.Color = 255
+                            ws_copy_new.Range(addr_str).Interior.Color = 255
+                        except: pass
+                        
+                # Tô màu cho Old Sheet
+                if red_addresses_old:
+                    chunk_size = 20
+                    for i in range(0, len(red_addresses_old), chunk_size):
+                        chunk = red_addresses_old[i:i + chunk_size]
+                        addr_str = ",".join(chunk)
+                        try:
+                            ws_copy_old.Range(addr_str).Interior.Color = 255
                         except: pass
 
-        # --- Sheet 1: Cell_Grid_Report ---
-        ws1 = wb_out.Sheets(1)
-        ws1.Name = "Cell_Grid_Report"
-        
-        headers1 = ["Index", "Category", "Action", "Address / ID", "Old Value / Size", "New Value / Size", "Details"]
-        data1 = [[d.index, d.category, d.action, d.address_id, str(d.old_val), str(d.new_val), d.details] for d in cell_diffs]
+            # --- Sheet 1: Cell_Grid_Report ---
+            ws1 = wb_out.Sheets(1)
+            ws1.Name = "Cell_Grid_Report"
             
-        if data1:
-            ws1.Range(ws1.Cells(1, 1), ws1.Cells(1, 7)).Value = headers1
-            rng_data = ws1.Range(ws1.Cells(2, 1), ws1.Cells(len(data1)+1, 7))
-            rng_data.Value = data1
-            
-            last_row = len(data1) + 1
-            ws1.ListObjects.Add(xlSrcRange, ws1.Range(f"A1:G{last_row}"), 0, xlYes).TableStyle = "TableStyleMedium2"
-            
-            try: ws1.Cells.Font.Name = "Meiryo UI"
-            except: pass
-
-            # Hyperlinks
-            for i, d in enumerate(cell_diffs):
-                row_idx = i + 2
-                cell_addr_obj = ws1.Cells(row_idx, 4) 
-                action = d.action
-                addr = d.address_id
+            headers1 = ["Index", "Category", "Action", "Address / ID", "Old Value / Size", "New Value / Size", "Details"]
+            data1 = [[d.index, d.category, d.action, d.address_id, str(d.old_val), str(d.new_val), d.details] for d in cell_diffs]
                 
-                target_sheet = "Source_New"
-                if "DELETED" in action:
-                    target_sheet = "Source_Old"
+            if data1:
+                ws1.Range(ws1.Cells(1, 1), ws1.Cells(1, 7)).Value = headers1
+                rng_data = ws1.Range(ws1.Cells(2, 1), ws1.Cells(len(data1)+1, 7))
+                rng_data.Value = data1
                 
-                if ":" not in addr and "Row" not in addr and " " not in addr: 
-                    sub_addr = f"'{target_sheet}'!{addr}"
-                    try:
-                        ws1.Hyperlinks.Add(Anchor=cell_addr_obj, Address="", SubAddress=sub_addr, TextToDisplay=addr)
-                    except: pass
-                elif "Row" in addr:
-                     try:
-                         row_num = addr.replace("Row", "").strip()
-                         sub_addr = f"'{target_sheet}'!A{row_num}"
-                         ws1.Hyperlinks.Add(Anchor=cell_addr_obj, Address="", SubAddress=sub_addr, TextToDisplay=addr)
-                     except: pass
-            
-            ws1.Columns.AutoFit()
-        else:
-            ws1.Cells(1, 1).Value = "No Cell/Grid Differences Found."
-
-        # --- Sheet 2: Shape_Report ---
-        ws2 = wb_out.Sheets.Add(After=ws1)
-        ws2.Name = "Shape_Report"
-        
-        headers2 = ["Index", "Shape ID", "Shape Name", "Verdict", 
-                    "Diff X", "Diff Y", "Diff W", "Diff H", 
-                    "Old Anchor", "New Anchor (Exp)", "New Anchor (Act)",
-                    "Old Rel X", "Old Rel Y", "New Rel X", "New Rel Y"]
-        
-        # FILTER DATA BASED ON REPORT MODE
-        final_shape_diffs = shape_diffs
-        if only_diffs:
-            final_shape_diffs = [s for s in shape_diffs if s.verdict != "MATCH"]
-
-        data2 = []
-        for s in final_shape_diffs:
-            data2.append([
-                s.index, s.shape_id, s.name, s.verdict, 
-                round(s.diff_x, 2), round(s.diff_y, 2), round(s.diff_w, 2), round(s.diff_h, 2),
-                s.old_anchor, s.exp_anchor, s.act_anchor,
-                round(s.old_rel_x, 2), round(s.old_rel_y, 2), 
-                round(s.new_rel_x, 2), round(s.new_rel_y, 2)
-            ])
-            
-        if data2:
-            ws2.Range(ws2.Cells(1, 1), ws2.Cells(1, 15)).Value = headers2
-            rng_data2 = ws2.Range(ws2.Cells(2, 1), ws2.Cells(len(data2)+1, 15))
-            rng_data2.Value = data2
-            
-            last_row = len(data2) + 1
-            ws2.ListObjects.Add(xlSrcRange, ws2.Range(f"A1:O{last_row}"), 0, xlYes).TableStyle = "TableStyleMedium2"
-            
-            try: ws2.Cells.Font.Name = "Meiryo UI"
-            except: pass
-
-            # Hyperlinks
-            for i, s in enumerate(final_shape_diffs):
-                row_idx = i + 2
+                last_row = len(data1) + 1
+                ws1.ListObjects.Add(xlSrcRange, ws1.Range(f"A1:G{last_row}"), 0, xlYes).TableStyle = "TableStyleMedium2"
                 
-                if s.old_anchor and s.old_anchor != "N/A":
-                    cell_old = ws2.Cells(row_idx, 9)
-                    sub_addr_old = f"'Source_Old'!{s.old_anchor.replace('$','')}"
-                    try:
-                        ws2.Hyperlinks.Add(Anchor=cell_old, Address="", SubAddress=sub_addr_old, TextToDisplay=s.old_anchor)
-                    except: pass
+                try: ws1.Cells.Font.Name = "Meiryo UI"
+                except: pass
+
+                # Hyperlinks
+                for i, d in enumerate(cell_diffs):
+                    row_idx = i + 2
+                    cell_addr_obj = ws1.Cells(row_idx, 4) 
+                    action = d.action
+                    addr = d.address_id
                     
-                if s.act_anchor and s.act_anchor != "N/A":
-                    cell_new = ws2.Cells(row_idx, 11)
-                    sub_addr_new = f"'Source_New'!{s.act_anchor.replace('$','')}"
-                    try:
-                        ws2.Hyperlinks.Add(Anchor=cell_new, Address="", SubAddress=sub_addr_new, TextToDisplay=s.act_anchor)
-                    except: pass
+                    target_sheet = "Source_New"
+                    if "DELETED" in action:
+                        target_sheet = "Source_Old"
+                    
+                    if ":" not in addr and "Row" not in addr and " " not in addr: 
+                        sub_addr = f"'{target_sheet}'!{addr}"
+                        try:
+                            ws1.Hyperlinks.Add(Anchor=cell_addr_obj, Address="", SubAddress=sub_addr, TextToDisplay=addr)
+                        except: pass
+                    elif "Row" in addr:
+                        try:
+                            row_num = addr.replace("Row", "").strip()
+                            sub_addr = f"'{target_sheet}'!A{row_num}"
+                            ws1.Hyperlinks.Add(Anchor=cell_addr_obj, Address="", SubAddress=sub_addr, TextToDisplay=addr)
+                        except: pass
+                
+                ws1.Columns.AutoFit()
+            else:
+                ws1.Cells(1, 1).Value = "No Cell/Grid Differences Found."
 
-            ws2.Columns.AutoFit()
-        else:
-            ws2.Cells(1, 1).Value = "No Shapes Found (or all Matched)."
-
-        # Output format ExDiff_YYYYMMDD_HHMMSS.xlsx
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_name = f"ExDiff_{timestamp}.xlsx"
-        out_path = os.path.join(output_folder, out_name)
-        
-        if os.path.exists(out_path):
-            try: os.remove(out_path)
-            except: pass
+            # --- Sheet 2: Shape_Report ---
+            ws2 = wb_out.Sheets.Add(After=ws1)
+            ws2.Name = "Shape_Report"
             
-        wb_out.SaveAs(out_path)
-        return out_path
+            headers2 = ["Index", "Shape ID", "Shape Name", "Verdict", 
+                        "Diff X", "Diff Y", "Diff W", "Diff H", 
+                        "Old Anchor", "New Anchor (Exp)", "New Anchor (Act)",
+                        "Old Rel X", "Old Rel Y", "New Rel X", "New Rel Y"]
+            
+            # FILTER DATA BASED ON REPORT MODE
+            final_shape_diffs = shape_diffs
+            if only_diffs:
+                final_shape_diffs = [s for s in shape_diffs if s.verdict != "MATCH"]
+
+            data2 = []
+            for s in final_shape_diffs:
+                data2.append([
+                    s.index, s.shape_id, s.name, s.verdict, 
+                    round(s.diff_x, 2), round(s.diff_y, 2), round(s.diff_w, 2), round(s.diff_h, 2),
+                    s.old_anchor, s.exp_anchor, s.act_anchor,
+                    round(s.old_rel_x, 2), round(s.old_rel_y, 2), 
+                    round(s.new_rel_x, 2), round(s.new_rel_y, 2)
+                ])
+                
+            if data2:
+                ws2.Range(ws2.Cells(1, 1), ws2.Cells(1, 15)).Value = headers2
+                rng_data2 = ws2.Range(ws2.Cells(2, 1), ws2.Cells(len(data2)+1, 15))
+                rng_data2.Value = data2
+                
+                last_row = len(data2) + 1
+                ws2.ListObjects.Add(xlSrcRange, ws2.Range(f"A1:O{last_row}"), 0, xlYes).TableStyle = "TableStyleMedium2"
+                
+                try: ws2.Cells.Font.Name = "Meiryo UI"
+                except: pass
+
+                # Hyperlinks
+                for i, s in enumerate(final_shape_diffs):
+                    row_idx = i + 2
+                    
+                    if s.old_anchor and s.old_anchor != "N/A":
+                        cell_old = ws2.Cells(row_idx, 9)
+                        sub_addr_old = f"'Source_Old'!{s.old_anchor.replace('$','')}"
+                        try:
+                            ws2.Hyperlinks.Add(Anchor=cell_old, Address="", SubAddress=sub_addr_old, TextToDisplay=s.old_anchor)
+                        except: pass
+                        
+                    if s.act_anchor and s.act_anchor != "N/A":
+                        cell_new = ws2.Cells(row_idx, 11)
+                        sub_addr_new = f"'Source_New'!{s.act_anchor.replace('$','')}"
+                        try:
+                            ws2.Hyperlinks.Add(Anchor=cell_new, Address="", SubAddress=sub_addr_new, TextToDisplay=s.act_anchor)
+                        except: pass
+
+                ws2.Columns.AutoFit()
+            else:
+                ws2.Cells(1, 1).Value = "No Shapes Found (or all Matched)."
+
+            # =========================================================================
+            # [CẬP NHẬT] ĐẶT TÊN FILE THEO ĐỊNH DẠNG MỚI
+            # Format: ExcelDiff_[10 kí tự file gốc]_[Tên sheet gốc]_[Thời gian].xlsx
+            # =========================================================================
+            try:
+                # 1. Lấy tên file gốc (Source) và bỏ phần mở rộng (.xlsx)
+                src_filename = ws_src_old.Parent.Name
+                src_name_clean = os.path.splitext(src_filename)[0]
+                
+                # 2. Cắt lấy 10 ký tự đầu tiên
+                short_src_name = src_name_clean[:10].strip()
+                
+                # 3. Lấy tên Sheet gốc
+                sheet_name = ws_src_old.Name
+                # Xử lý ký tự đặc biệt trong tên sheet (để an toàn khi lưu file)
+                safe_sheet_name = "".join([c if c.isalnum() or c in " -_" else "_" for c in sheet_name])
+
+                # 4. Lấy thời gian
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                
+                # 5. Tạo tên file cuối cùng
+                out_name = f"ExcelDiff_{short_src_name}_{safe_sheet_name}_{timestamp}.xlsx"
+                
+            except Exception:
+                # Fallback nếu lỗi lấy tên
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                out_name = f"ExcelDiff_{timestamp}.xlsx"
+
+            out_path = os.path.join(output_folder, out_name)
+            
+            if os.path.exists(out_path):
+                try: os.remove(out_path)
+                except: pass
+                
+            wb_out.SaveAs(out_path)
+            return out_path
+        finally:
+            self._optimize_speed(False)
 
     def cleanup(self):
         try:
@@ -484,10 +692,12 @@ class Comparator:
         
         if log_func: log_func(f"Analyzing Grid Structure (Rows: {len(raw_old)} vs {len(raw_new)})...")
         
-        sig_old = [str(r) for r in raw_old]
-        sig_new = [str(r) for r in raw_new]
+        # [UPDATED] TỐI ƯU HIỆU SUẤT: Dùng HASH để so sánh cấu trúc dòng nhanh hơn thay vì string
+        sig_old = [hash(tuple(r)) for r in raw_old]
+        sig_new = [hash(tuple(r)) for r in raw_new]
         
-        matcher = difflib.SequenceMatcher(None, sig_old, sig_new)
+        # [UPDATED] autojunk=False để tăng độ chính xác với dữ liệu số
+        matcher = difflib.SequenceMatcher(None, sig_old, sig_new, autojunk=False)
         
         row_map = {} 
         idx_counter = 1
@@ -511,9 +721,62 @@ class Comparator:
         
         col_map = {i: i for i in range(1, 256)} 
         
+        # --- [NEW FEATURE] CHECK COLUMN WIDTH ---
+        if log_func: log_func("Checking Column Widths...")
+        try:
+            # Lấy số cột lớn nhất để quét
+            max_col_check = 0
+            try: max_col_check = max(ws_old.UsedRange.Columns.Count, ws_new.UsedRange.Columns.Count)
+            except: pass
+            
+            if max_col_check > 0:
+                for c_idx in range(1, max_col_check + 1):
+                    try:
+                        w_old = ws_old.Columns(c_idx).ColumnWidth
+                        w_new = ws_new.Columns(c_idx).ColumnWidth
+                        
+                        # So sánh với sai số 0.1 (do float point)
+                        if abs(w_old - w_new) > 0.1:
+                            col_letter = get_column_letter(c_idx)
+                            report.append(CellDiff(
+                                idx_counter, "COLUMN", "RESIZED", 
+                                f"Col {col_letter}", 
+                                round(w_old, 2), round(w_new, 2), 
+                                "Width changed"
+                            ))
+                            idx_counter += 1
+                    except: continue
+        except Exception as e:
+            if log_func: log_func(f"Warning: Column Width check failed ({str(e)})")
+
+        # --- [NEW FEATURE] CHECK ROW HEIGHT ---
+        if log_func: log_func("Checking Row Heights...")
+        try:
+            max_row_check = 0
+            try: max_row_check = max(ws_old.UsedRange.Rows.Count, ws_new.UsedRange.Rows.Count)
+            except: pass
+            
+            if max_row_check > 0:
+                for r_idx in range(1, max_row_check + 1):
+                    try:
+                        h_old = ws_old.Rows(r_idx).RowHeight
+                        h_new = ws_new.Rows(r_idx).RowHeight
+                        
+                        if abs(h_old - h_new) > 0.1:
+                            report.append(CellDiff(
+                                idx_counter, "ROW", "RESIZED", 
+                                f"Row {r_idx}", 
+                                round(h_old, 2), round(h_new, 2), 
+                                "Height changed"
+                            ))
+                            idx_counter += 1
+                    except: continue
+        except Exception as e:
+            if log_func: log_func(f"Warning: Row Height check failed ({str(e)})")
+
         total_rows_check = len(raw_old)
         for r_old_idx, row_data in enumerate(raw_old):
-            if log_func and r_old_idx % 50 == 0:
+            if log_func and r_old_idx % 100 == 0:
                 log_func(f"Comparing Cells Row: {r_old_idx+1}/{total_rows_check}...")
 
             excel_r_old = r_old_idx + 1
@@ -526,19 +789,44 @@ class Comparator:
                         val_old = row_data[c_idx] if c_idx < len(row_data) else None
                         val_new = row_new_data[c_idx] if c_idx < len(row_new_data) else None
                         
-                        v1 = str(val_old) if val_old is not None else ""
-                        v2 = str(val_new) if val_new is not None else ""
+                        # [UPDATED] TĂNG ĐỘ CHÍNH XÁC: So sánh theo Type thay vì String
+                        is_diff = False
                         
-                        if v1 != v2:
-                            is_diff = True
-                            try:
-                                if abs(float(v1) - float(v2)) < 0.0001: is_diff = False
-                            except: pass
-                                
-                            if is_diff:
-                                addr = ws_old.Cells(excel_r_old, c_idx+1).Address.replace("$", "")
-                                report.append(CellDiff(idx_counter, "CELL", "MODIFIED", addr, v1, v2, f"Val changed"))
-                                idx_counter += 1
+                        # Chuẩn hóa None về "" để so sánh an toàn
+                        v1_check = "" if val_old is None else val_old
+                        v2_check = "" if val_new is None else val_new
+                        
+                        # Logic so sánh thông minh
+                        if type(v1_check) != type(v2_check):
+                            # Nếu khác kiểu, nhưng là số (VD: 10 vs 10.0) -> check sai số
+                            if isinstance(v1_check, (int, float)) and isinstance(v2_check, (int, float)):
+                                if abs(float(v1_check) - float(v2_check)) > 0.000001:
+                                    is_diff = True
+                            else:
+                                # Thử ép kiểu string nếu không phải số thuần túy
+                                if str(v1_check).strip() != str(v2_check).strip():
+                                    is_diff = True
+                        else:
+                            # Cùng kiểu dữ liệu
+                            if isinstance(v1_check, (int, float)):
+                                if abs(v1_check - v2_check) > 0.000001: # Epsilon cho số
+                                    is_diff = True
+                            elif isinstance(v1_check, str):
+                                # So sánh string có strip khoảng trắng thừa
+                                if v1_check.strip() != v2_check.strip(): 
+                                    is_diff = True
+                            else:
+                                # Các kiểu khác (datetime, boolean...)
+                                if v1_check != v2_check:
+                                    is_diff = True
+                        
+                        if is_diff:
+                            v1_str = str(val_old) if val_old is not None else ""
+                            v2_str = str(val_new) if val_new is not None else ""
+                            
+                            addr = ws_old.Cells(excel_r_old, c_idx+1).Address.replace("$", "")
+                            report.append(CellDiff(idx_counter, "CELL", "MODIFIED", addr, v1_str, v2_str, f"Val changed"))
+                            idx_counter += 1
                                 
         return report, row_map, col_map
 
@@ -559,14 +847,14 @@ class Comparator:
         for sid, s_old in shapes_old.items():
             if sid not in shapes_new:
                 report.append(ShapeDiff(idx, sid, s_old.name, "DELETED", 0,0,0,0, s_old.anchor_address, "N/A", "N/A", 
-                                      s_old.rel_left, s_old.rel_top, 0, 0))
+                                        s_old.rel_left, s_old.rel_top, 0, 0))
                 idx += 1
                 
         # 2. New
         for sid, s_new in shapes_new.items():
             if sid not in shapes_old:
                 report.append(ShapeDiff(idx, sid, s_new.name, "NEW", 0,0,0,0, "N/A", "N/A", s_new.anchor_address, 
-                                      0, 0, s_new.rel_left, s_new.rel_top))
+                                        0, 0, s_new.rel_left, s_new.rel_top))
                 idx += 1
                 
         # 3. Common
@@ -587,15 +875,15 @@ class Comparator:
                 verdict = "MATCH"
                 
                 if (s_new.anchor_row != exp_anchor_row) or (s_new.anchor_col != exp_anchor_col):
-                       verdict = "MOVED (Anchor Shift)"
+                        verdict = "MOVED (Anchor Shift)"
                 elif abs(shift_x) > self.tolerance or abs(shift_y) > self.tolerance:
                     verdict = "MOVED"
                 elif abs(diff_w) > self.tolerance or abs(diff_h) > self.tolerance:
                     verdict = "RESIZED"
 
                 report.append(ShapeDiff(idx, sid, s_old.name, verdict, shift_x, shift_y, diff_w, diff_h, 
-                                      s_old.anchor_address, exp_anchor_str, s_new.anchor_address,
-                                      s_old.rel_left, s_old.rel_top, s_new.rel_left, s_new.rel_top))
+                                        s_old.anchor_address, exp_anchor_str, s_new.anchor_address,
+                                        s_old.rel_left, s_old.rel_top, s_new.rel_left, s_new.rel_top))
                 idx += 1
                 
         return report
@@ -606,7 +894,7 @@ class AppUI(ctk.CTk):
     def __init__(self):
         super().__init__()
         
-        self.title(f"{PROJECT_NAME} - 1.0")
+        self.title(f"{PROJECT_NAME} - 2.1") # [UPDATED] Version 2.1
         self.geometry("700x400") 
         self.minsize(700, 400)
         
@@ -684,9 +972,9 @@ class AppUI(ctk.CTk):
         self.chk_limit.grid(row=0, column=0, padx=5, pady=5, sticky="w")
         
         self.cbo_scope_type = ctk.CTkComboBox(self.frame_scope, 
-                                              values=["Whole Sheet", "Columns Only", "Rows Only", "Specific Range"], 
-                                              state="disabled", font=MAIN_FONT,
-                                              command=self.toggle_range_input)
+                                                                values=["Whole Sheet", "Columns Only", "Rows Only", "Specific Range"], 
+                                                                state="disabled", font=MAIN_FONT,
+                                                                command=self.toggle_range_input)
         self.cbo_scope_type.grid(row=0, column=1, padx=5, pady=5)
         
         self.entry_range = ctk.CTkEntry(self.frame_scope, placeholder_text="e.g. A1:H50", state="disabled", font=MAIN_FONT)
@@ -709,14 +997,15 @@ class AppUI(ctk.CTk):
         # Row 1: Highlight (Moved to Right Col)
         self.chk_highlight = ctk.CTkCheckBox(self.frame_adv, text="Highlight Changes", font=MAIN_FONT)
         self.chk_highlight.grid(row=1, column=0, padx=10, pady=(10,0), sticky="w")
+        self.chk_highlight.select() # [UPDATED] Mặc định tích chọn
         
         # NOTE: Tolerance UI is removed (Hidden), defaulted to constant in logic.
         
         # --- C. ACTION ---
         self.btn_start = ctk.CTkButton(self, text="START COMPARISON", 
-                                       fg_color=ACCENT_COLOR, hover_color=HOVER_COLOR,
-                                       height=55, font=("Segoe UI", 16, "bold"), corner_radius=8,
-                                       command=self.start_process)
+                                                             fg_color=ACCENT_COLOR, hover_color=HOVER_COLOR,
+                                                             height=55, font=("Segoe UI", 16, "bold"), corner_radius=8,
+                                                             command=self.start_process)
         self.btn_start.grid(row=2, column=0, padx=15, pady=20, sticky="ew")
         
         # --- D. STATUS BAR (FOOTER) ---
@@ -725,21 +1014,21 @@ class AppUI(ctk.CTk):
         
         # Left Side: Status Text
         self.lbl_status = ctk.CTkLabel(self.frame_footer, text=" Ready.", font=("Segoe UI", 11, "bold"), 
-                                       text_color="#ECF0F1", anchor="w")
+                                                             text_color="#ECF0F1", anchor="w")
         self.lbl_status.pack(side="left", fill="x", expand=True, padx=10, pady=5)
         
         # Right Side: Version | Language | Help
-        ctk.CTkLabel(self.frame_footer, text=f"v1.0 | {AUTHOR_ID} ", font=("Segoe UI", 10), 
-                     text_color="#95A5A6").pack(side="right", padx=10)
+        ctk.CTkLabel(self.frame_footer, text=f"v2.1 | {AUTHOR_ID} ", font=("Segoe UI", 10), # [UPDATED] v2.1
+                             text_color="#95A5A6").pack(side="right", padx=10)
         
         self.cbo_lang = ctk.CTkComboBox(self.frame_footer, width=100, values=list(LANGUAGES.keys()), 
-                                        font=("Segoe UI", 11), command=self.change_language)
+                                                              font=("Segoe UI", 11), command=self.change_language)
         self.cbo_lang.set("English")
         self.cbo_lang.pack(side="right", padx=5)
         
         self.btn_help = ctk.CTkButton(self.frame_footer, text="❓ Help", width=70, font=("Segoe UI", 11),
-                                      fg_color="#34495E", hover_color="#4E5D6C",
-                                      command=self.show_help_popup)
+                                                            fg_color="#34495E", hover_color="#4E5D6C",
+                                                            command=self.show_help_popup)
         self.btn_help.pack(side="right", padx=5)
 
     # --- UI EVENT HANDLERS ---
@@ -890,7 +1179,8 @@ class AppUI(ctk.CTk):
             # 1. Inputs
             p_old = self.entry_old.get()
             p_new = self.entry_new.get()
-            p_out = self.entry_out.get() or os.path.join(os.path.expanduser("~"), "Desktop")
+            # Mặc định ra Downloads
+            p_out = self.entry_out.get() or os.path.join(os.path.expanduser("~"), "Downloads")
             
             sh_old_name = self.cbo_sheet_old.get()
             sh_new_name = self.cbo_sheet_new.get()
@@ -923,10 +1213,10 @@ class AppUI(ctk.CTk):
             
             # 5. Extract & Compare Shapes
             self.log(f"Scanning Old Shapes...")
-            shapes_old = engine.extract_shapes(ws_old, scan_range, log_func=self.log)
+            shapes_old = engine.extract_shapes(ws_old, "Source (Old)", scan_range, log_func=self.log)
             
             self.log(f"Scanning New Shapes...")
-            shapes_new = engine.extract_shapes(ws_new, scan_range, log_func=self.log)
+            shapes_new = engine.extract_shapes(ws_new, "Target (New)", scan_range, log_func=self.log)
             
             self.log(f"Comparing Shapes...")
             shape_report = comp.compare_shapes(shapes_old, shapes_new, r_map, c_map)
@@ -939,8 +1229,30 @@ class AppUI(ctk.CTk):
                                                      highlight_changes=is_highlight)
             
             self.log(txt_data["status_done"])
-            messagebox.showinfo("Success", f"{txt_data['msg_success']}{out_file}")
-            os.startfile(out_file)
+            
+            # =========================================================================
+            # [CẬP NHẬT] HỘP THOẠI YES/NO ĐỂ MỞ FILE
+            # =========================================================================
+            
+            # Chuẩn bị nội dung thông báo theo ngôn ngữ
+            if self.current_lang == "Tiếng Việt":
+                msg_title = "So sánh hoàn tất"
+                msg_body = f"{txt_data['msg_success']}\n{out_file}\n\nBạn có muốn mở file báo cáo ngay không?"
+            elif self.current_lang == "日本語":
+                msg_title = "比較完了"
+                msg_body = f"{txt_data['msg_success']}\n{out_file}\n\n今すぐレポートを開きますか？"
+            else: # English (Default)
+                msg_title = "Comparison Complete"
+                msg_body = f"{txt_data['msg_success']}\n{out_file}\n\nDo you want to open the report now?"
+
+            # Hiển thị hộp thoại Yes/No
+            should_open = messagebox.askyesno(msg_title, msg_body)
+            
+            if should_open:
+                try:
+                    os.startfile(out_file)
+                except Exception as open_err:
+                    messagebox.showerror("Error", f"Could not open file:\n{str(open_err)}")
 
         except Exception as e:
             import traceback
